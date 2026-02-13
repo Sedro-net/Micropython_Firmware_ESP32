@@ -1,9 +1,9 @@
 # captive_portal.py - AP mode + HTTP server with responsive UI
 
 import network
-import socket
 import time
 import ujson as json
+from microWebSrv import MicroWebSrv
 from util import Timer
 
 class CaptivePortal:
@@ -22,7 +22,7 @@ class CaptivePortal:
         self.password = password
         self.port = port
         self.ap = network.WLAN(network.AP_IF)
-        self.server_socket = None
+        self.web_server = None
         self.running = False
         self.config_received = False
         self.received_config = {}
@@ -68,76 +68,50 @@ class CaptivePortal:
                 break
             
             try:
-                self._handle_client()
+                time.sleep(0.1)
             except Exception as e:
                 print(f"[PORTAL] Error: {e}")
-            
-            time.sleep(0.1)
         
         self.stop()
         
         return self.received_config if self.config_received else None
     
     def _start_server(self):
-        """Start HTTP server."""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind(('0.0.0.0', self.port))
-        self.server_socket.listen(1)
-        self.server_socket.settimeout(1.0)  # Non-blocking with timeout
-        print(f"[PORTAL] HTTP server listening on port {self.port}")
+        """Start HTTP server using MicroWebSrv."""
+        # Create MicroWebSrv instance
+        self.web_server = MicroWebSrv()
+        
+        # Set port
+        self.web_server.SetPort(self.port)
+        
+        # Register routes
+        @self.web_server.Route('/')
+        @self.web_server.Route('/index')
+        @self.web_server.Route('/index.html')
+        def index_handler(httpClient, httpResponse):
+            print("[PORTAL] Send configuration page")
+            self._send_config_page(httpClient, httpResponse)
+        
+        @self.web_server.Route('/scan')
+        def scan_handler(httpClient, httpResponse):
+            self._send_scan_results(httpClient, httpResponse)
+        
+        @self.web_server.Route('/status')
+        def status_handler(httpClient, httpResponse):
+            self._send_status(httpClient, httpResponse)
+        
+        @self.web_server.Route('/configure', 'POST')
+        def configure_handler(httpClient, httpResponse):
+            self._handle_configure(httpClient, httpResponse)
+        
+        # Set not found page to redirect to root (captive portal behavior)
+        self.web_server.SetNotFoundPageUrl("/")
+        
+        # Start the server
+        self.web_server.Start(threaded=False)
+        print(f"[PORTAL] MicroWebSrv started on port {self.port}")
     
-    def _handle_client(self):
-        """Handle HTTP client request."""
-        try:
-            client, addr = self.server_socket.accept()
-            client.settimeout(3.0)
-            
-            request = client.recv(2048).decode('utf-8')
-            
-            # Parse request
-            lines = request.split('\\r\\n')
-            if not lines:
-                client.close()
-                return
-            
-            request_line = lines[0]
-            parts = request_line.split(' ')
-            
-            if len(parts) < 2:
-                client.close()
-                return
-            
-            method = parts[0]
-            path = parts[1]
-            
-            # Handle different endpoints
-            if method == 'GET':
-                if path == '/' or path.startswith('/index'):
-                    print("[PORTAL] Send configuration page")
-                    self._send_config_page(client)
-                elif path == '/scan':
-                    self._send_scan_results(client)
-                elif path == '/status':
-                    self._send_status(client)
-                else:
-                    # Redirect all other paths to root (captive portal behavior)
-                    self._send_redirect(client, '/')
-            elif method == 'POST':
-                if path == '/configure':
-                    self._handle_configure(client, request)
-                else:
-                    self._send_error(client, 404)
-            else:
-                self._send_error(client, 405)
-            
-            client.close()
-            
-        except OSError as e:
-            if e.args[0] != 11 and e.args[0] != 110:  # EAGAIN and ETIMEDOUT
-                pass  # Ignore timeout errors
-    
-    def _send_config_page(self, client):
+    def _send_config_page(self, httpClient, httpResponse):
         """Send configuration page."""
         # Scan for networks
         from wifi_manager import WiFiManager
@@ -150,36 +124,29 @@ class CaptivePortal:
         for net in networks:
             if net['ssid'] not in seen_ssids and net['ssid']:
                 seen_ssids.add(net['ssid'])
-                network_options += f'<option value=\"{net["ssid"]}\">{net["ssid"]} (RSSI: {net["rssi"]})</option>\n'
-                print(f'[PORTAL] added following ssid to options: {net['ssid']}')
+                network_options += f'<option value="{net["ssid"]}">{net["ssid"]} (RSSI: {net["rssi"]})</option>\n'
+                print(f'[PORTAL] added following ssid to options: {net["ssid"]}')
         
         html = self._get_html_template(network_options)
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-        
-        # Stream response in chunks to save memory
+        # Send response
         print('[PORTAL] Send response')
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseOk(
+            headers=None,
+            contentType="text/html",
+            contentCharset="utf-8",
+            content=html
+        )
     
-    def _send_scan_results(self, client):
+    def _send_scan_results(self, httpClient, httpResponse):
         """Send Wi-Fi scan results as JSON."""
         from wifi_manager import WiFiManager
         wifi = WiFiManager()
         networks = wifi.scan()
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: application/json
-Connection: close
-
-{json.dumps(networks)}"""
-        
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseJSONOk(networks)
     
-    def _send_status(self, client):
+    def _send_status(self, httpClient, httpResponse):
         """Send status as JSON."""
         import config
         
@@ -190,31 +157,24 @@ Connection: close
             'ap_ip': self.ap.ifconfig()[0]
         }
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: application/json
-Connection: close
-
-{json.dumps(status)}"""
-        
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseJSONOk(status)
     
-    def _handle_configure(self, client, request):
+    def _handle_configure(self, httpClient, httpResponse):
         """Handle configuration POST request."""
         try:
-            # Extract body from request
-            body_start = request.find('\\r\\n\\r\\n')
-            if body_start == -1:
-                self._send_error(client, 400)
+            # Read form data from POST request
+            content = httpClient.ReadRequestContent()
+            
+            if not content:
+                httpResponse.WriteResponseError(400)
                 return
             
-            body = request[body_start + 4:]
-            
             # Parse form data
-            config_data = self._parse_form_data(body)
+            config_data = self._parse_form_data(content.decode('utf-8'))
             
             # Validate required fields
             if 'wifi_ssid_1' not in config_data or not config_data['wifi_ssid_1']:
-                self._send_error(client, 400, "Wi-Fi SSID is required")
+                httpResponse.WriteResponseError(400)
                 return
             
             # Build configuration
@@ -260,27 +220,26 @@ Connection: close
             
             # Send success page
             success_html = """<!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Configuration Saved</title>
 <style>body{font-family:Arial,sans-serif;background:#0d1117;color:#c9d1d9;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
 .card{background:#161b22;border-radius:12px;padding:40px;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,0.4);max-width:400px}
 h1{color:#58a6ff;margin-bottom:20px}.icon{font-size:64px;margin-bottom:20px}p{font-size:16px;line-height:1.6;margin-bottom:20px}
 </style></head><body>
-<div class=\"card\"><div class=\"icon\">✓</div><h1>Configuration Saved</h1>
+<div class="card"><div class="icon">✓</div><h1>Configuration Saved</h1>
 <p>Your device will now restart and connect to the configured Wi-Fi network.</p>
 <p>You can close this page.</p></div></body></html>"""
             
-            response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{success_html}"""
-            
-            client.sendall(response.encode('utf-8'))
+            httpResponse.WriteResponseOk(
+                headers=None,
+                contentType="text/html",
+                contentCharset="utf-8",
+                content=success_html
+            )
             
         except Exception as e:
             print(f"[PORTAL] Configure error: {e}")
-            self._send_error(client, 500, str(e))
+            httpResponse.WriteResponseError(500)
     
     def _parse_form_data(self, body):
         """Parse URL-encoded form data."""
@@ -312,39 +271,12 @@ Connection: close
                 i += 1
         return result
     
-    def _send_redirect(self, client, location):
-        """Send HTTP redirect."""
-        response = f"""HTTP/1.1 302 Found
-Location: {location}
-Connection: close
-
-"""
-        client.sendall(response.encode('utf-8'))
-    
-    def _send_error(self, client, code, message=""):
-        """Send HTTP error."""
-        messages = {
-            400: "Bad Request",
-            404: "Not Found",
-            405: "Method Not Allowed",
-            500: "Internal Server Error"
-        }
-        msg = message or messages.get(code, "Error")
-        
-        response = f"""HTTP/1.1 {code} {messages.get(code, 'Error')}
-Content-Type: text/plain
-Connection: close
-
-{msg}"""
-        
-        client.sendall(response.encode('utf-8'))
-    
     def _get_html_template(self, network_options):
         """Get HTML template with inline CSS."""
         import config
         
         return f"""<!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{config.DEVICE_NAME} Configuration</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
@@ -376,91 +308,91 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;b
 @media(max-width:600px){{body{{padding:10px}}.card{{padding:20px}}.header{{padding:20px}}}}
 </style>
 </head><body>
-<div class=\"container\">
-<div class=\"header\">
+<div class="container">
+<div class="header">
 <h1>📡 {config.DEVICE_NAME}</h1>
 <p>ESP32 SHTC3 Sensor Configuration Portal</p>
 </div>
 
-<div class=\"card\">
+<div class="card">
 <h2>📊 Device Information</h2>
-<div class=\"device-info\">
-<div><span class=\"label\">Device ID:</span><span class=\"value\">{config.DEVICE_ID}</span></div>
-<div><span class=\"label\">Firmware Version:</span><span class=\"value\">{config.FIRMWARE_VERSION}</span></div>
-<div><span class=\"label\">AP IP Address:</span><span class=\"value\">192.168.4.1</span></div>
+<div class="device-info">
+<div><span class="label">Device ID:</span><span class="value">{config.DEVICE_ID}</span></div>
+<div><span class="label">Firmware Version:</span><span class="value">{config.FIRMWARE_VERSION}</span></div>
+<div><span class="label">AP IP Address:</span><span class="value">192.168.4.1</span></div>
 </div>
 </div>
 
-<form method=\"POST\" action=\"/configure\">
-<div class=\"card\">
+<form method="POST" action="/configure">
+<div class="card">
 <h2>📶 Wi-Fi Configuration</h2>
-<p style=\"color:#8b949e;margin-bottom:20px;font-size:14px\">Configure up to 2 Wi-Fi networks. The device will try them in priority order.</p>
+<p style="color:#8b949e;margin-bottom:20px;font-size:14px">Configure up to 2 Wi-Fi networks. The device will try them in priority order.</p>
 
-<div class=\"profile-group\">
-<div class=\"profile-title\">Primary Wi-Fi (Priority 1)</div>
-<div class=\"form-group\">
-<label for=\"wifi_ssid_1\">Network Name (SSID) *</label>
-<select id=\"wifi_ssid_1\" name=\"wifi_ssid_1\" required>
-<option value=\"\">-- Select or type below --</option>
+<div class="profile-group">
+<div class="profile-title">Primary Wi-Fi (Priority 1)</div>
+<div class="form-group">
+<label for="wifi_ssid_1">Network Name (SSID) *</label>
+<select id="wifi_ssid_1" name="wifi_ssid_1" required>
+<option value="">-- Select or type below --</option>
 {network_options}</select>
 <small>Or type manually if not listed</small>
 </div>
-<div class=\"form-group\">
-<label for=\"wifi_password_1\">Password *</label>
-<input type=\"password\" id=\"wifi_password_1\" name=\"wifi_password_1\" required>
+<div class="form-group">
+<label for="wifi_password_1">Password *</label>
+<input type="password" id="wifi_password_1" name="wifi_password_1" required>
 </div>
 </div>
 
-<div class=\"profile-group\">
-<div class=\"profile-title\">Backup Wi-Fi (Priority 2) - Optional</div>
-<div class=\"form-group\">
-<label for=\"wifi_ssid_2\">Network Name (SSID)</label>
-<select id=\"wifi_ssid_2\" name=\"wifi_ssid_2\">
-<option value=\"\">-- Select or type below --</option>
+<div class="profile-group">
+<div class="profile-title">Backup Wi-Fi (Priority 2) - Optional</div>
+<div class="form-group">
+<label for="wifi_ssid_2">Network Name (SSID)</label>
+<select id="wifi_ssid_2" name="wifi_ssid_2">
+<option value="">-- Select or type below --</option>
 {network_options}</select>
 </div>
-<div class=\"form-group\">
-<label for=\"wifi_password_2\">Password</label>
-<input type=\"password\" id=\"wifi_password_2\" name=\"wifi_password_2\">
+<div class="form-group">
+<label for="wifi_password_2">Password</label>
+<input type="password" id="wifi_password_2" name="wifi_password_2">
 </div>
 </div>
 </div>
 
-<div class=\"card\">
+<div class="card">
 <h2>🔌 MQTT Configuration</h2>
-<p style=\"color:#8b949e;margin-bottom:20px;font-size:14px\">Configure MQTT broker. Leave empty to use mDNS auto-discovery.</p>
+<p style="color:#8b949e;margin-bottom:20px;font-size:14px">Configure MQTT broker. Leave empty to use mDNS auto-discovery.</p>
 
-<div class=\"form-group\">
-<label for=\"mqtt_broker\">MQTT Broker</label>
-<input type=\"text\" id=\"mqtt_broker\" name=\"mqtt_broker\" placeholder=\"192.168.1.100 or mqtt.example.com\">
+<div class="form-group">
+<label for="mqtt_broker">MQTT Broker</label>
+<input type="text" id="mqtt_broker" name="mqtt_broker" placeholder="192.168.1.100 or mqtt.example.com">
 <small>Leave empty for auto-discovery via mDNS</small>
 </div>
-<div class=\"form-group\">
-<label for=\"mqtt_port\">MQTT Port</label>
-<input type=\"number\" id=\"mqtt_port\" name=\"mqtt_port\" value=\"1883\">
+<div class="form-group">
+<label for="mqtt_port">MQTT Port</label>
+<input type="number" id="mqtt_port" name="mqtt_port" value="1883">
 </div>
-<div class=\"form-group\">
-<label for=\"mqtt_username\">MQTT Username</label>
-<input type=\"text\" id=\"mqtt_username\" name=\"mqtt_username\" placeholder=\"Optional\">
+<div class="form-group">
+<label for="mqtt_username">MQTT Username</label>
+<input type="text" id="mqtt_username" name="mqtt_username" placeholder="Optional">
 </div>
-<div class=\"form-group\">
-<label for=\"mqtt_password\">MQTT Password</label>
-<input type=\"password\" id=\"mqtt_password\" name=\"mqtt_password\" placeholder=\"Optional\">
+<div class="form-group">
+<label for="mqtt_password">MQTT Password</label>
+<input type="password" id="mqtt_password" name="mqtt_password" placeholder="Optional">
 </div>
 </div>
 
-<div class=\"card\">
+<div class="card">
 <h2>⚙️ Device Settings</h2>
-<div class=\"form-group\">
-<label for=\"device_location\">Device Location</label>
-<input type=\"text\" id=\"device_location\" name=\"device_location\" value=\"living_room\" placeholder=\"living_room\">
+<div class="form-group">
+<label for="device_location">Device Location</label>
+<input type="text" id="device_location" name="device_location" value="living_room" placeholder="living_room">
 <small>Used in MQTT topic: home/&lt;location&gt;/&lt;device_id&gt;</small>
 </div>
 </div>
 
-<div class=\"card\">
-<button type=\"submit\" class=\"btn\">💾 Save Configuration</button>
-<div class=\"note\">
+<div class="card">
+<button type="submit" class="btn">💾 Save Configuration</button>
+<div class="note">
 <strong>Note:</strong> After saving, the device will restart and attempt to connect to the configured Wi-Fi network. 
 If connection fails, it will return to AP mode after 3 failed boot attempts.
 </div>
@@ -503,9 +435,9 @@ document.getElementById('wifi_ssid_2').addEventListener('change', function() {{
         """Stop captive portal."""
         self.running = False
         
-        if self.server_socket:
+        if self.web_server:
             try:
-                self.server_socket.close()
+                self.web_server.Stop()
             except:
                 pass
         

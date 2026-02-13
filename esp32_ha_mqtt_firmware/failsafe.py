@@ -4,7 +4,7 @@ import os
 import ujson as json
 import time
 import network
-import socket
+from microWebSrv import MicroWebSrv
 import sys
 import io
 from led_ring import create_led_ring
@@ -15,7 +15,7 @@ class FailsafeMode:
     
     def __init__(self):
         self.ap = network.WLAN(network.AP_IF)
-        self.server_socket = None
+        self.web_server = None
         self.logs = []
         self.error_info = None
     
@@ -75,13 +75,12 @@ class FailsafeMode:
         print("  - Reboot device")
         print("="*50 + "\n")
         
-        # Start web server
+        # Start web server with MicroWebSrv
         self._start_server()
         
         # Run server
         while True:
             try:
-                self._handle_client()
                 self.led.update()
                 time.sleep(0.1)
             except KeyboardInterrupt:
@@ -91,59 +90,44 @@ class FailsafeMode:
                 print(f"[FAILSAFE] Error: {e}")
     
     def _start_server(self):
-        """Start HTTP server."""
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_socket.bind(('0.0.0.0', 80))
-        self.server_socket.listen(1)
-        self.server_socket.settimeout(1.0)
+        """Start HTTP server using MicroWebSrv."""
+        # Create MicroWebSrv instance
+        self.web_server = MicroWebSrv()
+        
+        # Set port
+        self.web_server.SetPort(80)
+        
+        # Register routes
+        self.web_server.SetNotFoundPageUrl("/")
+        
+        # Register route handlers
+        @self.web_server.Route('/')
+        @self.web_server.Route('/index')
+        @self.web_server.Route('/index.html')
+        def index_handler(httpClient, httpResponse):
+            self._send_diagnostics_page(httpClient, httpResponse)
+        
+        @self.web_server.Route('/clear_config')
+        def clear_config_handler(httpClient, httpResponse):
+            self._handle_clear_config(httpClient, httpResponse)
+        
+        @self.web_server.Route('/reset_boot')
+        def reset_boot_handler(httpClient, httpResponse):
+            self._handle_reset_boot(httpClient, httpResponse)
+        
+        @self.web_server.Route('/reboot')
+        def reboot_handler(httpClient, httpResponse):
+            self._handle_reboot(httpClient, httpResponse)
+        
+        @self.web_server.Route('/logs')
+        def logs_handler(httpClient, httpResponse):
+            self._send_logs(httpClient, httpResponse)
+        
+        # Start the server
+        self.web_server.Start(threaded=False)
+        print("[FAILSAFE] MicroWebSrv started on port 80")
     
-    def _handle_client(self):
-        """Handle HTTP client."""
-        try:
-            client, addr = self.server_socket.accept()
-            client.settimeout(3.0)
-            
-            request = client.recv(2048).decode('utf-8')
-            
-            lines = request.split('\r\n')
-            if not lines:
-                client.close()
-                return
-            
-            request_line = lines[0]
-            parts = request_line.split(' ')
-            
-            if len(parts) < 2:
-                client.close()
-                return
-            
-            method = parts[0]
-            path = parts[1]
-            
-            if method == 'GET':
-                if path == '/' or path.startswith('/index'):
-                    self._send_diagnostics_page(client)
-                elif path == '/clear_config':
-                    self._handle_clear_config(client)
-                elif path == '/reset_boot':
-                    self._handle_reset_boot(client)
-                elif path == '/reboot':
-                    self._handle_reboot(client)
-                elif path == '/logs':
-                    self._send_logs(client)
-                else:
-                    self._send_error(client, 404)
-            else:
-                self._send_error(client, 405)
-            
-            client.close()
-            
-        except OSError as e:
-            if e.args[0] not in [11, 110]:  # Not EAGAIN or ETIMEDOUT
-                pass
-    
-    def _send_diagnostics_page(self, client):
+    def _send_diagnostics_page(self, httpClient, httpResponse):
         """Send diagnostics page."""
         import config
         import gc
@@ -227,15 +211,14 @@ body{{font-family:Arial,sans-serif;background:#0d1117;color:#c9d1d9;padding:20px
 </div>
 </body></html>"""
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-        
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseOk(
+            headers=None,
+            contentType="text/html",
+            contentCharset="utf-8",
+            content=html
+        )
     
-    def _send_logs(self, client):
+    def _send_logs(self, httpClient, httpResponse):
         """Send logs page."""
         logs = self.load_logs()
         
@@ -257,15 +240,14 @@ h1{{color:#58a6ff;margin-bottom:20px}}
 </div>
 </body></html>"""
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-        
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseOk(
+            headers=None,
+            contentType="text/html",
+            contentCharset="utf-8",
+            content=html
+        )
     
-    def _handle_clear_config(self, client):
+    def _handle_clear_config(self, httpClient, httpResponse):
         """Handle clear configuration request."""
         try:
             # Remove config file
@@ -296,18 +278,17 @@ h1{color:#58a6ff;margin-bottom:20px}</style>
 <script>setTimeout(function(){window.location.href='/reboot'},3000)</script>
 </body></html>"""
             
-            response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-            
-            client.sendall(response.encode('utf-8'))
+            httpResponse.WriteResponseOk(
+                headers=None,
+                contentType="text/html",
+                contentCharset="utf-8",
+                content=html
+            )
             
         except Exception as e:
-            self._send_error(client, 500, str(e))
+            httpResponse.WriteResponseError(500)
     
-    def _handle_reset_boot(self, client):
+    def _handle_reset_boot(self, httpClient, httpResponse):
         """Handle reset boot counter request."""
         try:
             # Remove boot count
@@ -332,18 +313,17 @@ h1{color:#58a6ff;margin-bottom:20px}</style>
 <script>setTimeout(function(){window.location.href='/reboot'},3000)</script>
 </body></html>"""
             
-            response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-            
-            client.sendall(response.encode('utf-8'))
+            httpResponse.WriteResponseOk(
+                headers=None,
+                contentType="text/html",
+                contentCharset="utf-8",
+                content=html
+            )
             
         except Exception as e:
-            self._send_error(client, 500, str(e))
+            httpResponse.WriteResponseError(500)
     
-    def _handle_reboot(self, client):
+    def _handle_reboot(self, httpClient, httpResponse):
         """Handle reboot request."""
         html = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -354,35 +334,16 @@ h1{color:#58a6ff;margin-bottom:20px}</style>
 <div><h1>🔄 Rebooting...</h1><p>Device is restarting now.</p></div>
 </body></html>"""
         
-        response = f"""HTTP/1.1 200 OK
-Content-Type: text/html; charset=utf-8
-Connection: close
-
-{html}"""
-        
-        client.sendall(response.encode('utf-8'))
+        httpResponse.WriteResponseOk(
+            headers=None,
+            contentType="text/html",
+            contentCharset="utf-8",
+            content=html
+        )
         
         time.sleep(1)
         import machine
         machine.reset()
-    
-    def _send_error(self, client, code, message=""):
-        """Send HTTP error."""
-        messages = {
-            400: "Bad Request",
-            404: "Not Found",
-            405: "Method Not Allowed",
-            500: "Internal Server Error"
-        }
-        msg = message or messages.get(code, "Error")
-        
-        response = f"""HTTP/1.1 {code} {messages.get(code, 'Error')}
-Content-Type: text/plain
-Connection: close
-
-{msg}"""
-        
-        client.sendall(response.encode('utf-8'))
 
 def check_failsafe():
     """Check if device should enter failsafe mode."""
