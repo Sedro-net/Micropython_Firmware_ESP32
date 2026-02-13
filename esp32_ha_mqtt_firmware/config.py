@@ -22,7 +22,7 @@ I2C_FREQ = 400000  # 400 kHz
 SHTC3_ADDRESS = 0x70
 
 # LED Ring Configuration (WS2812B)
-LED_PIN = 15
+LED_PIN = 19
 LED_COUNT = 12
 LED_COLOR_ORDER = "RGB"  # Change to "GRB" if colors are wrong
 
