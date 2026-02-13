@@ -50,4 +50,438 @@ class DeviceController:
         if config.WDT_ENABLED:
             try:
                 self.wdt = machine.WDT(timeout=config.WDT_TIMEOUT)
-                print(\"[MAIN] Watchdog enabled\")\n            except Exception as e:\n                print(f\"[MAIN] Watchdog init failed: {e}\")\n    \n    def initialize(self):\n        \"\"\"Initialize all components.\"\"\"\n        print(\"\\n[MAIN] Initializing components...\")\n        \n        # Initialize LED ring first (for status indication)\n        led_config = self.config.get('led', {})\n        self.led = create_led_ring(\n            pin=config.LED_PIN,\n            num_leds=config.LED_COUNT,\n            color_order=config.LED_COLOR_ORDER\n        )\n        \n        if self.led:\n            # Show blue blinking during initialization\n            self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=500)\n        \n        # Initialize sensor\n        self.sensor = create_shtc3(\n            sda_pin=config.I2C_SDA_PIN,\n            scl_pin=config.I2C_SCL_PIN,\n            freq=config.I2C_FREQ\n        )\n        \n        if not self.sensor:\n            print(\"[MAIN] Warning: Sensor not available\")\n        \n        # Setup Wi-Fi\n        self.wifi = create_wifi_manager()\n        \n        # Try to connect to Wi-Fi\n        if not self.wifi.connect(retry=True):\n            print(\"[MAIN] Wi-Fi connection failed, starting captive portal...\")\n            \n            if self.led:\n                self.led.set_effect('solid', (255, 165, 0))  # Orange for portal\n            \n            # Start captive portal\n            portal_config = start_captive_portal(timeout=config.CAPTIVE_PORTAL_TIMEOUT)\n            \n            if portal_config:\n                # Save configuration\n                print(\"[MAIN] Saving portal configuration...\")\n                self.config = {**self.config, **portal_config}\n                save_config(self.config)\n                \n                # Reboot to apply\n                print(\"[MAIN] Configuration saved, rebooting...\")\n                time.sleep(2)\n                machine.reset()\n            else:\n                print(\"[MAIN] Portal timeout, continuing without Wi-Fi...\")\n        \n        # Setup MQTT\n        if self.wifi.is_connected():\n            mqtt_config = self.config.get('mqtt', {})\n            \n            # Try mDNS discovery if no broker configured\n            if not mqtt_config.get('broker'):\n                print(\"[MAIN] No MQTT broker configured, trying discovery...\")\n                from mdns_discovery import discover_mqtt_broker\n                broker_info = discover_mqtt_broker(timeout=5)\n                if broker_info:\n                    mqtt_config['broker'] = broker_info['ip']\n                    mqtt_config['port'] = broker_info['port']\n                    update_config({'mqtt': mqtt_config})\n            \n            if mqtt_config.get('broker'):\n                # Update base topic with location\n                location = self.config.get('device', {}).get('location', 'living_room')\n                mqtt_config['base_topic'] = config.get_base_topic(location)\n                mqtt_config['client_id'] = config.DEVICE_ID\n                \n                self.mqtt = create_mqtt_client(mqtt_config)\n                \n                if self.mqtt.connect():\n                    print(\"[MAIN] MQTT connected\")\n                    \n                    # Setup message handlers\n                    self._setup_mqtt_handlers()\n                    \n                    # Publish Home Assistant discovery\n                    if mqtt_config.get('discovery_enabled', True):\n                        self.ha_discovery = create_ha_discovery(self.config)\n                        self.ha_discovery.publish_all_discoveries(self.mqtt)\n                else:\n                    print(\"[MAIN] MQTT connection failed\")\n        \n        # Update LED to idle state\n        if self.led:\n            if self.mqtt and self.mqtt.is_connected():\n                led_cfg = self.config.get('led', {})\n                self.led.set_state(\n                    'ON' if led_cfg.get('enabled', True) else 'OFF',\n                    brightness=led_cfg.get('brightness', 128),\n                    color=tuple(led_cfg.get('color', [255, 255, 255])),\n                    effect=led_cfg.get('effect', 'solid')\n                )\n            else:\n                self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=1000)\n        \n        print(\"[MAIN] Initialization complete\\n\")\n    \n    def _setup_mqtt_handlers(self):\n        \"\"\"Setup MQTT message handlers.\"\"\"\n        base_topic = self.mqtt.base_topic\n        \n        # Subscribe to command topics\n        self.mqtt.subscribe(f\"{base_topic}/command\", self._handle_command)\n        self.mqtt.subscribe(f\"{base_topic}/config\", self._handle_config)\n        self.mqtt.subscribe(f\"{base_topic}/led/command\", self._handle_led_command)\n        self.mqtt.subscribe(f\"{base_topic}/ota\", self._handle_ota_command)\n    \n    def _handle_command(self, topic, message):\n        \"\"\"Handle general commands.\"\"\"\n        print(f\"[MQTT] Command: {message}\")\n        \n        try:\n            cmd = json.loads(message)\n            \n            if cmd.get('action') == 'restart':\n                print(\"[MAIN] Restart requested\")\n                time.sleep(1)\n                machine.reset()\n            \n            elif cmd.get('action') == 'scan_wifi':\n                networks = self.wifi.scan()\n                self.mqtt.publish_json(f\"{topic}/response\", {'networks': networks})\n            \n        except Exception as e:\n            print(f\"[MQTT] Command error: {e}\")\n    \n    def _handle_config(self, topic, message):\n        \"\"\"Handle configuration updates.\"\"\"\n        print(f\"[MQTT] Config update: {message}\")\n        \n        try:\n            config_update = json.loads(message)\n            update_config(config_update)\n            self.config = load_config()\n            print(\"[MQTT] Configuration updated\")\n        except Exception as e:\n            print(f\"[MQTT] Config error: {e}\")\n    \n    def _handle_led_command(self, topic, message):\n        \"\"\"Handle LED commands.\"\"\"\n        if not self.led:\n            return\n        \n        try:\n            cmd = json.loads(message)\n            \n            state = cmd.get('state', 'ON')\n            brightness = cmd.get('brightness', 255)\n            color = cmd.get('color', {})\n            effect = cmd.get('effect', 'solid')\n            \n            # Extract RGB\n            r = color.get('r', 255)\n            g = color.get('g', 255)\n            b = color.get('b', 255)\n            \n            self.led.set_state(state, brightness, (r, g, b), effect)\n            \n            # Publish state\n            self._publish_led_state()\n            \n            print(f\"[LED] Command executed: {state}, RGB({r},{g},{b}), {effect}\")\n            \n        except Exception as e:\n            print(f\"[MQTT] LED command error: {e}\")\n    \n    def _handle_ota_command(self, topic, message):\n        \"\"\"Handle OTA update commands.\"\"\"\n        try:\n            cmd = json.loads(message)\n            \n            url = cmd.get('url')\n            sha256 = cmd.get('sha256')\n            \n            if not url:\n                print(\"[OTA] No URL provided\")\n                return\n            \n            print(f\"[OTA] Update requested: {url}\")\n            \n            # Publish status\n            self.mqtt.publish_json(f\"{topic}/status\", {'status': 'downloading'})\n            \n            # Perform update\n            success = perform_ota_update(url, sha256)\n            \n            if success:\n                self.mqtt.publish_json(f\"{topic}/status\", {'status': 'success'})\n            else:\n                self.mqtt.publish_json(f\"{topic}/status\", {'status': 'failed'})\n            \n        except Exception as e:\n            print(f\"[OTA] Error: {e}\")\n            self.mqtt.publish_json(f\"{topic}/status\", {'status': 'error', 'message': str(e)})\n    \n    def _setup_tasks(self):\n        \"\"\"Setup scheduled tasks.\"\"\"\n        sensor_cfg = self.config.get('sensor', {})\n        \n        # Sensor reading task\n        self.scheduler.add_task(\n            'read_sensor',\n            self._task_read_sensor,\n            sensor_cfg.get('read_interval', 10) * 1000\n        )\n        \n        # Sensor publish task\n        self.scheduler.add_task(\n            'publish_sensor',\n            self._task_publish_sensor,\n            sensor_cfg.get('publish_interval', 30) * 1000\n        )\n        \n        # MQTT check messages task\n        self.scheduler.add_task(\n            'mqtt_check',\n            self._task_mqtt_check,\n            100  # Check every 100ms\n        )\n        \n        # LED update task\n        self.scheduler.add_task(\n            'led_update',\n            self._task_led_update,\n            50  # Update every 50ms for smooth animations\n        )\n        \n        # Memory management task\n        self.scheduler.add_task(\n            'memory_gc',\n            self._task_memory_gc,\n            60 * 1000  # Every 60 seconds\n        )\n        \n        # Connection monitor task\n        self.scheduler.add_task(\n            'connection_monitor',\n            self._task_connection_monitor,\n            5 * 1000  # Every 5 seconds\n        )\n    \n    def _task_read_sensor(self):\n        \"\"\"Task: Read sensor data.\"\"\"\n        if not self.sensor:\n            return\n        \n        temp, hum = self.sensor.read()\n        \n        if temp is not None and hum is not None:\n            # Apply calibration offsets\n            sensor_cfg = self.config.get('sensor', {})\n            temp += sensor_cfg.get('temp_offset', 0.0)\n            hum += sensor_cfg.get('humidity_offset', 0.0)\n            \n            # Check for significant change\n            significant_change = False\n            if self.sensor_data['temperature'] is not None:\n                temp_delta = abs(temp - self.sensor_data['temperature'])\n                hum_delta = abs(hum - self.sensor_data['humidity'])\n                \n                if (temp_delta >= config.TEMP_CHANGE_THRESHOLD or \n                    hum_delta >= config.HUMIDITY_CHANGE_THRESHOLD):\n                    significant_change = True\n            \n            self.sensor_data['temperature'] = temp\n            self.sensor_data['humidity'] = hum\n            self.last_sensor_read = time.time()\n            \n            # Update LED gauge if active\n            if self.led:\n                self.led.set_gauge_data(temperature=temp, humidity=hum)\n            \n            # Publish immediately on significant change\n            if significant_change:\n                print(f\"[SENSOR] Significant change detected\")\n                self._task_publish_sensor()\n    \n    def _task_publish_sensor(self):\n        \"\"\"Task: Publish sensor data to MQTT.\"\"\"\n        if not self.mqtt or not self.mqtt.is_connected():\n            return\n        \n        if self.sensor_data['temperature'] is None:\n            return\n        \n        # Build state payload\n        state = {\n            'temperature': round(self.sensor_data['temperature'], 2),\n            'humidity': round(self.sensor_data['humidity'], 2),\n            'rssi': self.wifi.get_connection_info().get('rssi') if self.wifi.is_connected() else None,\n            'uptime': int(time.time() - self.start_time),\n            'timestamp': time.time()\n        }\n        \n        # Publish\n        self.mqtt.publish_state(state)\n        self.last_sensor_publish = time.time()\n        \n        print(f\"[SENSOR] Published: T={state['temperature']}\u00b0C, H={state['humidity']}%\")\n    \n    def _task_mqtt_check(self):\n        \"\"\"Task: Check for MQTT messages.\"\"\"\n        if self.mqtt and self.mqtt.is_connected():\n            self.mqtt.check_msg()\n    \n    def _task_led_update(self):\n        \"\"\"Task: Update LED animations.\"\"\"\n        if self.led:\n            self.led.update()\n    \n    def _task_memory_gc(self):\n        \"\"\"Task: Memory management.\"\"\"\n        check_memory(threshold=config.GC_THRESHOLD, force_gc=True)\n    \n    def _task_connection_monitor(self):\n        \"\"\"Task: Monitor and maintain connections.\"\"\"\n        # Check Wi-Fi\n        if not self.wifi.is_connected():\n            print(\"[MAIN] Wi-Fi disconnected, reconnecting...\")\n            if self.led:\n                self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=500)\n            self.wifi.connect(retry=False)\n        \n        # Check MQTT\n        if self.wifi.is_connected() and self.mqtt:\n            if not self.mqtt.is_connected():\n                print(\"[MAIN] MQTT disconnected, reconnecting...\")\n                self.mqtt.reconnect()\n    \n    def _publish_led_state(self):\n        \"\"\"Publish LED state to MQTT.\"\"\"\n        if self.mqtt and self.mqtt.is_connected() and self.led:\n            state = self.led.get_state()\n            self.mqtt.publish_json(f\"{self.mqtt.base_topic}/led/state\", state)\n    \n    def run(self):\n        \"\"\"Run main loop.\"\"\"\n        # Setup tasks\n        self._setup_tasks()\n        \n        # Initial sensor read and publish\n        self._task_read_sensor()\n        time.sleep(0.5)\n        self._task_publish_sensor()\n        \n        print(\"[MAIN] Starting main loop...\\n\")\n        \n        # Main loop\n        try:\n            while True:\n                # Feed watchdog\n                if self.wdt:\n                    self.wdt.feed()\n                \n                # Run scheduler\n                self.scheduler.run_once()\n                \n                # Small delay\n                time.sleep_ms(10)\n                \n        except KeyboardInterrupt:\n            print(\"\\n[MAIN] Interrupted by user\")\n            self.shutdown()\n        except Exception as e:\n            print(f\"\\n[MAIN] Fatal error: {e}\")\n            import sys\n            sys.print_exception(e)\n            self.shutdown()\n            raise\n    \n    def shutdown(self):\n        \"\"\"Graceful shutdown.\"\"\"\n        print(\"\\n[MAIN] Shutting down...\")\n        \n        # Disconnect MQTT\n        if self.mqtt:\n            self.mqtt.disconnect()\n        \n        # Disconnect Wi-Fi\n        if self.wifi:\n            self.wifi.disconnect()\n        \n        # Turn off LED\n        if self.led:\n            self.led.clear()\n        \n        print(\"[MAIN] Shutdown complete\")\n\ndef main():\n    \"\"\"Main entry point.\"\"\"\n    try:\n        # Check for failsafe mode\n        if check_failsafe():\n            print(\"[MAIN] Failsafe mode detected\")\n            start_failsafe()\n            return\n        \n        # Create and run controller\n        controller = DeviceController()\n        controller.initialize()\n        controller.run()\n        \n    except Exception as e:\n        print(f\"[MAIN] Fatal error: {e}\")\n        import sys\n        sys.print_exception(e)\n        \n        # Log error to failsafe log\n        try:\n            import io\n            log_stream = io.StringIO()\n            sys.print_exception(e, log_stream)\n            \n            with open('failsafe.log', 'a') as f:\n                f.write(f\"\\n\\n=== Error at {time.time()} ===\\n\")\n                f.write(log_stream.getvalue())\n        except:\n            pass\n        \n        # Reboot after delay\n        print(\"[MAIN] Rebooting in 5 seconds...\")\n        time.sleep(5)\n        machine.reset()\n\nif __name__ == '__main__':\n    main()\n
+                print("[MAIN] Watchdog enabled")
+            except Exception as e:
+                print(f"[MAIN] Watchdog init failed: {e}")
+    
+    def initialize(self):
+        """Initialize all components."""
+        print("\n[MAIN] Initializing components...")
+        
+        # Initialize LED ring first (for status indication)
+        led_config = self.config.get('led', {})
+        self.led = create_led_ring(
+            pin=config.LED_PIN,
+            num_leds=config.LED_COUNT,
+            color_order=config.LED_COLOR_ORDER
+        )
+        
+        if self.led:
+            # Show blue blinking during initialization
+            self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=500)
+        
+        # Initialize sensor
+        self.sensor = create_shtc3(
+            sda_pin=config.I2C_SDA_PIN,
+            scl_pin=config.I2C_SCL_PIN,
+            freq=config.I2C_FREQ
+        )
+        
+        if not self.sensor:
+            print("[MAIN] Warning: Sensor not available")
+        
+        # Setup Wi-Fi
+        self.wifi = create_wifi_manager()
+        
+        # Try to connect to Wi-Fi
+        if not self.wifi.connect(retry=True):
+            print("[MAIN] Wi-Fi connection failed, starting captive portal...")
+            
+            if self.led:
+                self.led.set_effect('solid', (255, 165, 0))  # Orange for portal
+            
+            # Start captive portal
+            portal_config = start_captive_portal(timeout=config.CAPTIVE_PORTAL_TIMEOUT)
+            
+            if portal_config:
+                # Save configuration
+                print("[MAIN] Saving portal configuration...")
+                self.config = {**self.config, **portal_config}
+                save_config(self.config)
+                
+                # Reboot to apply
+                print("[MAIN] Configuration saved, rebooting...")
+                time.sleep(2)
+                machine.reset()
+            else:
+                print("[MAIN] Portal timeout, continuing without Wi-Fi...")
+        
+        # Setup MQTT
+        if self.wifi.is_connected():
+            mqtt_config = self.config.get('mqtt', {})
+            
+            # Try mDNS discovery if no broker configured
+            if not mqtt_config.get('broker'):
+                print("[MAIN] No MQTT broker configured, trying discovery...")
+                from mdns_discovery import discover_mqtt_broker
+                broker_info = discover_mqtt_broker(timeout=5)
+                if broker_info:
+                    mqtt_config['broker'] = broker_info['ip']
+                    mqtt_config['port'] = broker_info['port']
+                    update_config({'mqtt': mqtt_config})
+            
+            if mqtt_config.get('broker'):
+                # Update base topic with location
+                location = self.config.get('device', {}).get('location', 'living_room')
+                mqtt_config['base_topic'] = config.get_base_topic(location)
+                mqtt_config['client_id'] = config.DEVICE_ID
+                
+                self.mqtt = create_mqtt_client(mqtt_config)
+                
+                if self.mqtt.connect():
+                    print("[MAIN] MQTT connected")
+                    
+                    # Setup message handlers
+                    self._setup_mqtt_handlers()
+                    
+                    # Publish Home Assistant discovery
+                    if mqtt_config.get('discovery_enabled', True):
+                        self.ha_discovery = create_ha_discovery(self.config)
+                        self.ha_discovery.publish_all_discoveries(self.mqtt)
+                else:
+                    print("[MAIN] MQTT connection failed")
+        
+        # Update LED to idle state
+        if self.led:
+            if self.mqtt and self.mqtt.is_connected():
+                led_cfg = self.config.get('led', {})
+                self.led.set_state(
+                    'ON' if led_cfg.get('enabled', True) else 'OFF',
+                    brightness=led_cfg.get('brightness', 128),
+                    color=tuple(led_cfg.get('color', [255, 255, 255])),
+                    effect=led_cfg.get('effect', 'solid')
+                )
+            else:
+                self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=1000)
+        
+        print("[MAIN] Initialization complete\n")
+    
+    def _setup_mqtt_handlers(self):
+        """Setup MQTT message handlers."""
+        base_topic = self.mqtt.base_topic
+        
+        # Subscribe to command topics
+        self.mqtt.subscribe(f"{base_topic}/command", self._handle_command)
+        self.mqtt.subscribe(f"{base_topic}/config", self._handle_config)
+        self.mqtt.subscribe(f"{base_topic}/led/command", self._handle_led_command)
+        self.mqtt.subscribe(f"{base_topic}/ota", self._handle_ota_command)
+    
+    def _handle_command(self, topic, message):
+        """Handle general commands."""
+        print(f"[MQTT] Command: {message}")
+        
+        try:
+            cmd = json.loads(message)
+            
+            if cmd.get('action') == 'restart':
+                print("[MAIN] Restart requested")
+                time.sleep(1)
+                machine.reset()
+            
+            elif cmd.get('action') == 'scan_wifi':
+                networks = self.wifi.scan()
+                self.mqtt.publish_json(f"{topic}/response", {'networks': networks})
+            
+        except Exception as e:
+            print(f"[MQTT] Command error: {e}")
+    
+    def _handle_config(self, topic, message):
+        """Handle configuration updates."""
+        print(f"[MQTT] Config update: {message}")
+        
+        try:
+            config_update = json.loads(message)
+            update_config(config_update)
+            self.config = load_config()
+            print("[MQTT] Configuration updated")
+        except Exception as e:
+            print(f"[MQTT] Config error: {e}")
+    
+    def _handle_led_command(self, topic, message):
+        """Handle LED commands."""
+        if not self.led:
+            return
+        
+        try:
+            cmd = json.loads(message)
+            
+            state = cmd.get('state', 'ON')
+            brightness = cmd.get('brightness', 255)
+            color = cmd.get('color', {})
+            effect = cmd.get('effect', 'solid')
+            
+            # Extract RGB
+            r = color.get('r', 255)
+            g = color.get('g', 255)
+            b = color.get('b', 255)
+            
+            self.led.set_state(state, brightness, (r, g, b), effect)
+            
+            # Publish state
+            self._publish_led_state()
+            
+            print(f"[LED] Command executed: {state}, RGB({r},{g},{b}), {effect}")
+            
+        except Exception as e:
+            print(f"[MQTT] LED command error: {e}")
+    
+    def _handle_ota_command(self, topic, message):
+        """Handle OTA update commands."""
+        try:
+            cmd = json.loads(message)
+            
+            url = cmd.get('url')
+            sha256 = cmd.get('sha256')
+            
+            if not url:
+                print("[OTA] No URL provided")
+                return
+            
+            print(f"[OTA] Update requested: {url}")
+            
+            # Publish status
+            self.mqtt.publish_json(f"{topic}/status", {'status': 'downloading'})
+            
+            # Perform update
+            success = perform_ota_update(url, sha256)
+            
+            if success:
+                self.mqtt.publish_json(f"{topic}/status", {'status': 'success'})
+            else:
+                self.mqtt.publish_json(f"{topic}/status", {'status': 'failed'})
+            
+        except Exception as e:
+            print(f"[OTA] Error: {e}")
+            self.mqtt.publish_json(f"{topic}/status", {'status': 'error', 'message': str(e)})
+    
+    def _setup_tasks(self):
+        """Setup scheduled tasks."""
+        sensor_cfg = self.config.get('sensor', {})
+        
+        # Sensor reading task
+        self.scheduler.add_task(
+            'read_sensor',
+            self._task_read_sensor,
+            sensor_cfg.get('read_interval', 10) * 1000
+        )
+        
+        # Sensor publish task
+        self.scheduler.add_task(
+            'publish_sensor',
+            self._task_publish_sensor,
+            sensor_cfg.get('publish_interval', 30) * 1000
+        )
+        
+        # MQTT check messages task
+        self.scheduler.add_task(
+            'mqtt_check',
+            self._task_mqtt_check,
+            100  # Check every 100ms
+        )
+        
+        # LED update task
+        self.scheduler.add_task(
+            'led_update',
+            self._task_led_update,
+            50  # Update every 50ms for smooth animations
+        )
+        
+        # Memory management task
+        self.scheduler.add_task(
+            'memory_gc',
+            self._task_memory_gc,
+            60 * 1000  # Every 60 seconds
+        )
+        
+        # Connection monitor task
+        self.scheduler.add_task(
+            'connection_monitor',
+            self._task_connection_monitor,
+            5 * 1000  # Every 5 seconds
+        )
+    
+    def _task_read_sensor(self):
+        """Task: Read sensor data."""
+        if not self.sensor:
+            return
+        
+        temp, hum = self.sensor.read()
+        
+        if temp is not None and hum is not None:
+            # Apply calibration offsets
+            sensor_cfg = self.config.get('sensor', {})
+            temp += sensor_cfg.get('temp_offset', 0.0)
+            hum += sensor_cfg.get('humidity_offset', 0.0)
+            
+            # Check for significant change
+            significant_change = False
+            if self.sensor_data['temperature'] is not None:
+                temp_delta = abs(temp - self.sensor_data['temperature'])
+                hum_delta = abs(hum - self.sensor_data['humidity'])
+                
+                if (temp_delta >= config.TEMP_CHANGE_THRESHOLD or 
+                    hum_delta >= config.HUMIDITY_CHANGE_THRESHOLD):
+                    significant_change = True
+            
+            self.sensor_data['temperature'] = temp
+            self.sensor_data['humidity'] = hum
+            self.last_sensor_read = time.time()
+            
+            # Update LED gauge if active
+            if self.led:
+                self.led.set_gauge_data(temperature=temp, humidity=hum)
+            
+            # Publish immediately on significant change
+            if significant_change:
+                print(f"[SENSOR] Significant change detected")
+                self._task_publish_sensor()
+    
+    def _task_publish_sensor(self):
+        """Task: Publish sensor data to MQTT."""
+        if not self.mqtt or not self.mqtt.is_connected():
+            return
+        
+        if self.sensor_data['temperature'] is None:
+            return
+        
+        # Build state payload
+        state = {
+            'temperature': round(self.sensor_data['temperature'], 2),
+            'humidity': round(self.sensor_data['humidity'], 2),
+            'rssi': self.wifi.get_connection_info().get('rssi') if self.wifi.is_connected() else None,
+            'uptime': int(time.time() - self.start_time),
+            'timestamp': time.time()
+        }
+        
+        # Publish
+        self.mqtt.publish_state(state)
+        self.last_sensor_publish = time.time()
+        
+        print(f"[SENSOR] Published: T={state['temperature']}°C, H={state['humidity']}%")
+    
+    def _task_mqtt_check(self):
+        """Task: Check for MQTT messages."""
+        if self.mqtt and self.mqtt.is_connected():
+            self.mqtt.check_msg()
+    
+    def _task_led_update(self):
+        """Task: Update LED animations."""
+        if self.led:
+            self.led.update()
+    
+    def _task_memory_gc(self):
+        """Task: Memory management."""
+        check_memory(threshold=config.GC_THRESHOLD, force_gc=True)
+    
+    def _task_connection_monitor(self):
+        """Task: Monitor and maintain connections."""
+        # Check Wi-Fi
+        if not self.wifi.is_connected():
+            print("[MAIN] Wi-Fi disconnected, reconnecting...")
+            if self.led:
+                self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=500)
+            self.wifi.connect(retry=False)
+        
+        # Check MQTT
+        if self.wifi.is_connected() and self.mqtt:
+            if not self.mqtt.is_connected():
+                print("[MAIN] MQTT disconnected, reconnecting...")
+                self.mqtt.reconnect()
+    
+    def _publish_led_state(self):
+        """Publish LED state to MQTT."""
+        if self.mqtt and self.mqtt.is_connected() and self.led:
+            state = self.led.get_state()
+            self.mqtt.publish_json(f"{self.mqtt.base_topic}/led/state", state)
+    
+    def run(self):
+        """Run main loop."""
+        # Setup tasks
+        self._setup_tasks()
+        
+        # Initial sensor read and publish
+        self._task_read_sensor()
+        time.sleep(0.5)
+        self._task_publish_sensor()
+        
+        print("[MAIN] Starting main loop...\n")
+        
+        # Main loop
+        try:
+            while True:
+                # Feed watchdog
+                if self.wdt:
+                    self.wdt.feed()
+                
+                # Run scheduler
+                self.scheduler.run_once()
+                
+                # Small delay
+                time.sleep_ms(10)
+                
+        except KeyboardInterrupt:
+            print("\n[MAIN] Interrupted by user")
+            self.shutdown()
+        except Exception as e:
+            print(f"\n[MAIN] Fatal error: {e}")
+            import sys
+            sys.print_exception(e)
+            self.shutdown()
+            raise
+    
+    def shutdown(self):
+        """Graceful shutdown."""
+        print("\n[MAIN] Shutting down...")
+        
+        # Disconnect MQTT
+        if self.mqtt:
+            self.mqtt.disconnect()
+        
+        # Disconnect Wi-Fi
+        if self.wifi:
+            self.wifi.disconnect()
+        
+        # Turn off LED
+        if self.led:
+            self.led.clear()
+        
+        print("[MAIN] Shutdown complete")
+
+def main():
+    """Main entry point."""
+    try:
+        # Check for failsafe mode
+        if check_failsafe():
+            print("[MAIN] Failsafe mode detected")
+            start_failsafe()
+            return
+        
+        # Create and run controller
+        controller = DeviceController()
+        controller.initialize()
+        controller.run()
+        
+    except Exception as e:
+        print(f"[MAIN] Fatal error: {e}")
+        import sys
+        sys.print_exception(e)
+        
+        # Log error to failsafe log
+        try:
+            import io
+            log_stream = io.StringIO()
+            sys.print_exception(e, log_stream)
+            
+            with open('failsafe.log', 'a') as f:
+                f.write(f"\n\n=== Error at {time.time()} ===\n")
+                f.write(log_stream.getvalue())
+        except:
+            pass
+        
+        # Reboot after delay
+        print("[MAIN] Rebooting in 5 seconds...")
+        time.sleep(5)
+        machine.reset()
+
+if __name__ == '__main__':
+    main()

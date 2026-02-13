@@ -149,7 +149,7 @@ class CaptivePortal:
         for net in networks:
             if net['ssid'] not in seen_ssids and net['ssid']:
                 seen_ssids.add(net['ssid'])
-                network_options += f'<option value=\"{net[\"ssid\"]}\">{net[\"ssid\"]} (RSSI: {net[\"rssi\"]})</option>\\n'
+                network_options += f'<option value=\"{net["ssid"]}\">{net["ssid"]} (RSSI: {net["rssi"]})</option>\n'
         
         html = self._get_html_template(network_options)
         

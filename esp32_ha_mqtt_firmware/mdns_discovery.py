@@ -56,5 +56,153 @@ class MDNSDiscovery:
                     
                     if broker and broker not in discovered:
                         discovered.append(broker)
-                        print(f\"[MDNS] Found: {broker['host']} at {broker['ip']}:{broker['port']}\")\n                
-                except OSError:\n                    pass  # Timeout, continue\n            \n            sock.close()\n            \n            if discovered:\n                print(f\"[MDNS] Discovery complete: {len(discovered)} broker(s) found\")\n            else:\n                print(\"[MDNS] No brokers found\")\n            \n            return discovered\n            \n        except Exception as e:\n            print(f\"[MDNS] Discovery error: {e}\")\n            return []\n    \n    def discover_first(self):\n        \"\"\"Discover and return first broker found.\"\"\"\n        brokers = self.discover()\n        return brokers[0] if brokers else None\n    \n    def _build_mdns_query(self, service_name):\n        \"\"\"Build mDNS query packet (simplified).\"\"\"\n        # Transaction ID\n        transaction_id = b'\\x00\\x00'\n        \n        # Flags (standard query)\n        flags = b'\\x00\\x00'\n        \n        # Questions: 1, Answer RRs: 0, Authority RRs: 0, Additional RRs: 0\n        questions = b'\\x00\\x01'\n        answer_rrs = b'\\x00\\x00'\n        authority_rrs = b'\\x00\\x00'\n        additional_rrs = b'\\x00\\x00'\n        \n        # Build question\n        qname = b''\n        for part in service_name.split('.'):\n            qname += bytes([len(part)]) + part.encode('utf-8')\n        qname += b'\\x00'  # End of name\n        \n        # Type: PTR (12), Class: IN (1)\n        qtype = b'\\x00\\x0c'\n        qclass = b'\\x00\\x01'\n        \n        return transaction_id + flags + questions + answer_rrs + authority_rrs + additional_rrs + qname + qtype + qclass\n    \n    def _parse_mdns_response(self, data):\n        \"\"\"Parse mDNS response (simplified).\n        \n        This is a basic parser that extracts IP and port from mDNS responses.\n        A full implementation would properly parse all DNS record types.\n        \"\"\"\n        try:\n            # Skip header (12 bytes)\n            if len(data) < 12:\n                return None\n            \n            # For simplicity, we'll look for A records (IP) and SRV records (port)\n            # This is a basic implementation\n            \n            # Skip questions section and look for answers\n            idx = 12\n            \n            # Skip question name\n            while idx < len(data) and data[idx] != 0:\n                length = data[idx]\n                if length & 0xc0 == 0xc0:  # Compression pointer\n                    idx += 2\n                    break\n                idx += length + 1\n            \n            if idx >= len(data):\n                return None\n            \n            idx += 1  # Skip null terminator\n            idx += 4  # Skip qtype and qclass\n            \n            # Try to extract IP from response\n            # This is very simplified and may not work for all mDNS responses\n            \n            # For demo purposes, return a common default if parsing fails\n            # In production, you'd implement full DNS parsing or use a library\n            \n            return None  # Simplified implementation\n            \n        except Exception:\n            return None\n\n# Simplified discovery function\ndef discover_mqtt_broker(timeout=5):\n    \"\"\"\n    Discover MQTT broker via mDNS.\n    \n    Note: This is a simplified implementation. For production use,\n    consider using a full mDNS library or configuring the broker manually.\n    \n    Returns:\n        Broker info dict or None\n    \"\"\"\n    print(\"[MDNS] Starting MQTT broker discovery...\")\n    print(\"[MDNS] Note: mDNS discovery is experimental, consider manual configuration\")\n    \n    # Try multicast DNS discovery\n    discovery = MDNSDiscovery(timeout=timeout)\n    broker = discovery.discover_first()\n    \n    if broker:\n        print(f\"[MDNS] Discovered broker: {broker['ip']}:{broker['port']}\")\n        return broker\n    \n    # Fallback: Try common broker addresses on local network\n    print(\"[MDNS] Trying common broker addresses...\")\n    \n    import network\n    wlan = network.WLAN(network.STA_IF)\n    if wlan.isconnected():\n        # Get local network prefix\n        ip = wlan.ifconfig()[0]\n        ip_parts = ip.split('.')\n        network_prefix = '.'.join(ip_parts[:3])\n        \n        # Try common addresses\n        common_hosts = [\n            f\"{network_prefix}.1\",\n            f\"{network_prefix}.100\",\n            \"homeassistant.local\",\n            \"localhost\"\n        ]\n        \n        for host in common_hosts:\n            if _test_mqtt_connection(host, 1883):\n                print(f\"[MDNS] Found MQTT broker at {host}:1883\")\n                return {'host': host, 'ip': host, 'port': 1883}\n    \n    print(\"[MDNS] No MQTT broker discovered\")\n    return None\n\ndef _test_mqtt_connection(host, port, timeout=2):\n    \"\"\"Test if MQTT broker is reachable.\"\"\"\n    try:\n        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n        sock.settimeout(timeout)\n        sock.connect((host, port))\n        sock.close()\n        return True\n    except:\n        return False\n
+                        print(f"[MDNS] Found: {broker['host']} at {broker['ip']}:{broker['port']}")
+                
+                except OSError:
+                    pass  # Timeout, continue
+            
+            sock.close()
+            
+            if discovered:
+                print(f"[MDNS] Discovery complete: {len(discovered)} broker(s) found")
+            else:
+                print("[MDNS] No brokers found")
+            
+            return discovered
+            
+        except Exception as e:
+            print(f"[MDNS] Discovery error: {e}")
+            return []
+    
+    def discover_first(self):
+        """Discover and return first broker found."""
+        brokers = self.discover()
+        return brokers[0] if brokers else None
+    
+    def _build_mdns_query(self, service_name):
+        """Build mDNS query packet (simplified)."""
+        # Transaction ID
+        transaction_id = b'\x00\x00'
+        
+        # Flags (standard query)
+        flags = b'\x00\x00'
+        
+        # Questions: 1, Answer RRs: 0, Authority RRs: 0, Additional RRs: 0
+        questions = b'\x00\x01'
+        answer_rrs = b'\x00\x00'
+        authority_rrs = b'\x00\x00'
+        additional_rrs = b'\x00\x00'
+        
+        # Build question
+        qname = b''
+        for part in service_name.split('.'):
+            qname += bytes([len(part)]) + part.encode('utf-8')
+        qname += b'\x00'  # End of name
+        
+        # Type: PTR (12), Class: IN (1)
+        qtype = b'\x00\x0c'
+        qclass = b'\x00\x01'
+        
+        return transaction_id + flags + questions + answer_rrs + authority_rrs + additional_rrs + qname + qtype + qclass
+    
+    def _parse_mdns_response(self, data):
+        """Parse mDNS response (simplified).
+        
+        This is a basic parser that extracts IP and port from mDNS responses.
+        A full implementation would properly parse all DNS record types.
+        """
+        try:
+            # Skip header (12 bytes)
+            if len(data) < 12:
+                return None
+            
+            # For simplicity, we'll look for A records (IP) and SRV records (port)
+            # This is a basic implementation
+            
+            # Skip questions section and look for answers
+            idx = 12
+            
+            # Skip question name
+            while idx < len(data) and data[idx] != 0:
+                length = data[idx]
+                if length & 0xc0 == 0xc0:  # Compression pointer
+                    idx += 2
+                    break
+                idx += length + 1
+            
+            if idx >= len(data):
+                return None
+            
+            idx += 1  # Skip null terminator
+            idx += 4  # Skip qtype and qclass
+            
+            # Try to extract IP from response
+            # This is very simplified and may not work for all mDNS responses
+            
+            # For demo purposes, return a common default if parsing fails
+            # In production, you'd implement full DNS parsing or use a library
+            
+            return None  # Simplified implementation
+            
+        except Exception:
+            return None
+
+# Simplified discovery function
+def discover_mqtt_broker(timeout=5):
+    """
+    Discover MQTT broker via mDNS.
+    
+    Note: This is a simplified implementation. For production use,
+    consider using a full mDNS library or configuring the broker manually.
+    
+    Returns:
+        Broker info dict or None
+    """
+    print("[MDNS] Starting MQTT broker discovery...")
+    print("[MDNS] Note: mDNS discovery is experimental, consider manual configuration")
+    
+    # Try multicast DNS discovery
+    discovery = MDNSDiscovery(timeout=timeout)
+    broker = discovery.discover_first()
+    
+    if broker:
+        print(f"[MDNS] Discovered broker: {broker['ip']}:{broker['port']}")
+        return broker
+    
+    # Fallback: Try common broker addresses on local network
+    print("[MDNS] Trying common broker addresses...")
+    
+    import network
+    wlan = network.WLAN(network.STA_IF)
+    if wlan.isconnected():
+        # Get local network prefix
+        ip = wlan.ifconfig()[0]
+        ip_parts = ip.split('.')
+        network_prefix = '.'.join(ip_parts[:3])
+        
+        # Try common addresses
+        common_hosts = [
+            f"{network_prefix}.1",
+            f"{network_prefix}.100",
+            "homeassistant.local",
+            "localhost"
+        ]
+        
+        for host in common_hosts:
+            if _test_mqtt_connection(host, 1883):
+                print(f"[MDNS] Found MQTT broker at {host}:1883")
+                return {'host': host, 'ip': host, 'port': 1883}
+    
+    print("[MDNS] No MQTT broker discovered")
+    return None
+
+def _test_mqtt_connection(host, port, timeout=2):
+    """Test if MQTT broker is reachable."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        sock.close()
+        return True
+    except:
+        return False
