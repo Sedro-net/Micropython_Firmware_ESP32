@@ -114,6 +114,7 @@ class CaptivePortal:
             # Handle different endpoints
             if method == 'GET':
                 if path == '/' or path.startswith('/index'):
+                    print("[PORTAL] Send configuration page")
                     self._send_config_page(client)
                 elif path == '/scan':
                     self._send_scan_results(client)
@@ -150,6 +151,7 @@ class CaptivePortal:
             if net['ssid'] not in seen_ssids and net['ssid']:
                 seen_ssids.add(net['ssid'])
                 network_options += f'<option value=\"{net["ssid"]}\">{net["ssid"]} (RSSI: {net["rssi"]})</option>\n'
+                print(f'[PORTAL] added following ssid to options: {net['ssid']}')
         
         html = self._get_html_template(network_options)
         
@@ -160,6 +162,7 @@ Connection: close
 {html}"""
         
         # Stream response in chunks to save memory
+        print('[PORTAL] Send response')
         client.sendall(response.encode('utf-8'))
     
     def _send_scan_results(self, client):

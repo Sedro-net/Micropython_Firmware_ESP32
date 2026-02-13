@@ -5,6 +5,7 @@ import machine
 import time
 import ujson as json
 import os
+import main as main_py
 
 BOOT_COUNT_FILE = "boot_count.json"
 BOOT_LOOP_THRESHOLD = 3
@@ -88,6 +89,8 @@ def main():
     # webrepl.start()
     
     print("[BOOT] Boot sequence complete, starting main.py...\n")
+
+    main_py.main_sequence()
 
 if __name__ == "__main__":
     main()

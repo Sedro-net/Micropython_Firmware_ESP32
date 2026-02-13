@@ -7,6 +7,8 @@ import network
 import socket
 import sys
 import io
+from led_ring import create_led_ring
+import config
 
 class FailsafeMode:
     """Failsafe mode for recovery and diagnostics."""
@@ -38,6 +40,17 @@ class FailsafeMode:
         print("\n" + "="*50)
         print("FAILSAFE MODE ACTIVATED")
         print("="*50)
+
+        self.led = create_led_ring(
+            pin=config.LED_PIN,
+            num_leds=config.LED_COUNT,
+            color_order=config.LED_COLOR_ORDER
+        )
+        
+        if self.led:
+            # Show red blinking during initialization
+            self.led.set_effect('blink', config.LED_STATUS_FAILSAFE, speed=100)
+
         
         self.error_info = self.load_failsafe_info()
         
@@ -45,7 +58,6 @@ class FailsafeMode:
         print(f"Time: {self.error_info.get('timestamp', 0)}")
         
         # Start AP
-        import config
         ap_ssid = f"{config.AP_SSID}-FAILSAFE"
         print(f"\nStarting failsafe AP: {ap_ssid}")
         
@@ -70,6 +82,7 @@ class FailsafeMode:
         while True:
             try:
                 self._handle_client()
+                self.led.update()
                 time.sleep(0.1)
             except KeyboardInterrupt:
                 print("\n[FAILSAFE] Interrupted")

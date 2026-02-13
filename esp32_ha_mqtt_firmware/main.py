@@ -47,12 +47,6 @@ class DeviceController:
         
         # Watchdog
         self.wdt = None
-        if config.WDT_ENABLED:
-            try:
-                self.wdt = machine.WDT(timeout=config.WDT_TIMEOUT)
-                print("[MAIN] Watchdog enabled")
-            except Exception as e:
-                print(f"[MAIN] Watchdog init failed: {e}")
     
     def initialize(self):
         """Initialize all components."""
@@ -96,7 +90,7 @@ class DeviceController:
             if portal_config:
                 # Save configuration
                 print("[MAIN] Saving portal configuration...")
-                self.config = {**self.config, **portal_config}
+                self.config.update(portal_config)
                 save_config(self.config)
                 
                 # Reboot to apply
@@ -154,6 +148,12 @@ class DeviceController:
             else:
                 self.led.set_effect('blink', config.LED_STATUS_DISCONNECTED, speed=1000)
         
+        if config.WDT_ENABLED:
+            try:
+                self.wdt = machine.WDT(timeout=config.WDT_TIMEOUT)
+                print("[MAIN] Watchdog enabled")
+            except Exception as e:
+                print(f"[MAIN] Watchdog init failed: {e}")
         print("[MAIN] Initialization complete\n")
     
     def _setup_mqtt_handlers(self):
@@ -447,8 +447,12 @@ class DeviceController:
         
         print("[MAIN] Shutdown complete")
 
-def main():
+def main_sequence():
     """Main entry point."""
+    print("="*50)
+    print("ESP32 SHTC3 Firmware - Entering Main Sequence")
+    print("="*50)
+
     try:
         # Check for failsafe mode
         if check_failsafe():
@@ -484,4 +488,4 @@ def main():
         machine.reset()
 
 if __name__ == '__main__':
-    main()
+    main_sequence()
