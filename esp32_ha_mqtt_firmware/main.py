@@ -76,9 +76,8 @@ class DeviceController:
         # Try to connect to Wi-Fi
         if not self.wifi.connect(retry=True):
 
-            self.wifi = None
-            gc.collect()
-            
+            self.wifi.deinit()
+
             print("[MAIN] Wi-Fi connection failed, starting captive portal...")
             
             if self.led:
