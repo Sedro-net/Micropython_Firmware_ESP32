@@ -78,36 +78,35 @@ class CaptivePortal:
     
     def _start_server(self):
         """Start HTTP server using MicroWebSrv."""
-        # Create MicroWebSrv instance
-        self.web_server = MicroWebSrv()
-        
-        # Set port
-        self.web_server.SetPort(self.port)
-        
+
         # Register routes
-        @self.web_server.Route('/')
-        @self.web_server.Route('/index')
-        @self.web_server.Route('/index.html')
+        @MicroWebSrv.route('/')
+        @MicroWebSrv.route('/index')
+        @MicroWebSrv.route('/index.html')
         def index_handler(httpClient, httpResponse):
             print("[PORTAL] Send configuration page")
             self._send_config_page(httpClient, httpResponse)
         
-        @self.web_server.Route('/scan')
+        @MicroWebSrv.route('/scan')
         def scan_handler(httpClient, httpResponse):
             self._send_scan_results(httpClient, httpResponse)
         
-        @self.web_server.Route('/status')
+        @MicroWebSrv.route('/status')
         def status_handler(httpClient, httpResponse):
             self._send_status(httpClient, httpResponse)
         
-        @self.web_server.Route('/configure', 'POST')
+        @MicroWebSrv.route('/configure', 'POST')
         def configure_handler(httpClient, httpResponse):
             self._handle_configure(httpClient, httpResponse)
+        
+        # Create MicroWebSrv instance
+        self.web_server = MicroWebSrv(port=self.port)
         
         # Set not found page to redirect to root (captive portal behavior)
         self.web_server.SetNotFoundPageUrl("/")
         
         # Start the server
+        print(f"[PORTAL] Try to start MicroWebSrv")
         self.web_server.Start(threaded=False)
         print(f"[PORTAL] MicroWebSrv started on port {self.port}")
     

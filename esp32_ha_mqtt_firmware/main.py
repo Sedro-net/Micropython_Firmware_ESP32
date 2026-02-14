@@ -10,13 +10,9 @@ import config
 from storage import load_config, save_config, update_config
 from util import Scheduler, IntervalTimer, Timer, ExponentialBackoff, check_memory, format_uptime
 from wifi_manager import create_wifi_manager
-from captive_portal import start_captive_portal
-from mqtt_client import create_mqtt_client
-from ha_discovery import create_ha_discovery
 from shtc3 import create_shtc3
 from led_ring import create_led_ring
-from ota import perform_ota_update
-from failsafe import check_failsafe, start_failsafe
+
 
 class DeviceController:
     """Main device controller."""
@@ -79,12 +75,17 @@ class DeviceController:
         
         # Try to connect to Wi-Fi
         if not self.wifi.connect(retry=True):
+
+            self.wifi = None
+            gc.collect()
+            
             print("[MAIN] Wi-Fi connection failed, starting captive portal...")
             
             if self.led:
                 self.led.set_effect('solid', (255, 165, 0))  # Orange for portal
             
             # Start captive portal
+            from captive_portal import start_captive_portal
             portal_config = start_captive_portal(timeout=config.CAPTIVE_PORTAL_TIMEOUT)
             
             if portal_config:
@@ -99,8 +100,13 @@ class DeviceController:
                 machine.reset()
             else:
                 print("[MAIN] Portal timeout, continuing without Wi-Fi...")
-        
+                # Reboot after delay
+                print("[MAIN] Rebooting in 5 seconds...")
+                time.sleep(5)
+                machine.reset()
+
         # Setup MQTT
+        from mqtt_client import create_mqtt_client
         if self.wifi.is_connected():
             mqtt_config = self.config.get('mqtt', {})
             
@@ -130,6 +136,7 @@ class DeviceController:
                     
                     # Publish Home Assistant discovery
                     if mqtt_config.get('discovery_enabled', True):
+                        from ha_discovery import create_ha_discovery
                         self.ha_discovery = create_ha_discovery(self.config)
                         self.ha_discovery.publish_all_discoveries(self.mqtt)
                 else:
@@ -243,6 +250,7 @@ class DeviceController:
             self.mqtt.publish_json(f"{topic}/status", {'status': 'downloading'})
             
             # Perform update
+            from ota import perform_ota_update
             success = perform_ota_update(url, sha256)
             
             if success:
@@ -453,13 +461,7 @@ def main_sequence():
     print("ESP32 SHTC3 Firmware - Entering Main Sequence")
     print("="*50)
 
-    try:
-        # Check for failsafe mode
-        if check_failsafe():
-            print("[MAIN] Failsafe mode detected")
-            start_failsafe()
-            return
-        
+    try:  
         # Create and run controller
         controller = DeviceController()
         controller.initialize()

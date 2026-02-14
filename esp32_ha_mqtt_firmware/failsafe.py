@@ -91,43 +91,41 @@ class FailsafeMode:
     
     def _start_server(self):
         """Start HTTP server using MicroWebSrv."""
-        # Create MicroWebSrv instance
-        self.web_server = MicroWebSrv()
-        
-        # Set port
-        self.web_server.SetPort(80)
-        
-        # Register routes
-        self.web_server.SetNotFoundPageUrl("/")
-        
         # Register route handlers
-        @self.web_server.Route('/')
-        @self.web_server.Route('/index')
-        @self.web_server.Route('/index.html')
+        @MicroWebSrv.route('/')
+        @MicroWebSrv.route('/index')
+        @MicroWebSrv.route('/index.html')
         def index_handler(httpClient, httpResponse):
             self._send_diagnostics_page(httpClient, httpResponse)
         
-        @self.web_server.Route('/clear_config')
+        @MicroWebSrv.route('/clear_config')
         def clear_config_handler(httpClient, httpResponse):
             self._handle_clear_config(httpClient, httpResponse)
         
-        @self.web_server.Route('/reset_boot')
+        @MicroWebSrv.route('/reset_boot')
         def reset_boot_handler(httpClient, httpResponse):
             self._handle_reset_boot(httpClient, httpResponse)
         
-        @self.web_server.Route('/reboot')
+        @MicroWebSrv.route('/reboot')
         def reboot_handler(httpClient, httpResponse):
             self._handle_reboot(httpClient, httpResponse)
         
-        @self.web_server.Route('/logs')
+        @MicroWebSrv.route('/logs')
         def logs_handler(httpClient, httpResponse):
             self._send_logs(httpClient, httpResponse)
+        
+        # Create MicroWebSrv instance
+        self.web_server = MicroWebSrv(port = 80)
+
+        # Register routes
+        self.web_server.SetNotFoundPageUrl("/")
         
         # Start the server
         self.web_server.Start(threaded=False)
         print("[FAILSAFE] MicroWebSrv started on port 80")
     
     def _send_diagnostics_page(self, httpClient, httpResponse):
+        print("\n[FAILSAFE] Send diagnostics page.")
         """Send diagnostics page."""
         import config
         import gc

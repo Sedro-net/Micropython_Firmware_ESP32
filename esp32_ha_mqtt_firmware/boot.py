@@ -5,7 +5,8 @@ import machine
 import time
 import ujson as json
 import os
-import main as main_py
+from failsafe import check_failsafe, start_failsafe
+
 
 BOOT_COUNT_FILE = "boot_count.json"
 BOOT_LOOP_THRESHOLD = 3
@@ -76,11 +77,19 @@ def main():
     print("ESP32 SHTC3 Firmware - Boot Sequence")
     print("="*50)
     
+    # Check for failsafe mode
+    if check_failsafe():
+        print("[BOOT] Failsafe mode detected")
+        start_failsafe()
+        return
+
     # Check for boot loop
     in_boot_loop = check_boot_loop()
     
     if in_boot_loop:
         print("[BOOT] Entering failsafe mode...")
+        start_failsafe()
+        return
     else:
         print("[BOOT] Normal boot sequence")
     
@@ -90,6 +99,7 @@ def main():
     
     print("[BOOT] Boot sequence complete, starting main.py...\n")
 
+    import main as main_py
     main_py.main_sequence()
 
 if __name__ == "__main__":
